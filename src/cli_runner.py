@@ -4,24 +4,29 @@ import argparse
 import logging
 from typing import Optional
 
-# Add the project root to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.aot_enums import AotTriggerMode
-from src.aot_dataclasses import AoTRunnerConfig
-from src.aot_orchestrator import InteractiveAoTOrchestrator
-from src.aot_constants import (
-    DEFAULT_MAIN_MODEL_NAMES as DEFAULT_AOT_MAIN_MODEL_NAMES, # Renamed for clarity
-    DEFAULT_SMALL_MODEL_NAMES as DEFAULT_AOT_ASSESSMENT_MODEL_NAMES, # Renamed
-    DEFAULT_MAX_STEPS as DEFAULT_AOT_MAX_STEPS, # Renamed
-    DEFAULT_MAX_TIME_SECONDS as DEFAULT_AOT_MAX_TIME_SECONDS, # Renamed
-    DEFAULT_NO_PROGRESS_LIMIT as DEFAULT_AOT_NO_PROGRESS_LIMIT, # Renamed
-    DEFAULT_MAIN_TEMPERATURE as DEFAULT_AOT_MAIN_TEMPERATURE, # Renamed
-    DEFAULT_ASSESSMENT_TEMPERATURE as DEFAULT_AOT_ASSESSMENT_TEMPERATURE # Renamed
-)
+# Core components for the new architecture
+from src.cot_orchestrator import CoTOrchestrator
+from src.aot_processor import AoTProcessor
+from src.l2t_processor import L2TProcessor
+from src.llm_client import LLMClient # Import LLMClient
 
-from src.l2t_orchestrator import L2TOrchestrator
+# Enums and Configs
+from src.aot_enums import AotTriggerMode # Reused for generic trigger mode
+from src.aot_dataclasses import AoTRunnerConfig
 from src.l2t_dataclasses import L2TConfig
+
+# Constants for default values (consider organizing them if they proliferate)
+from src.aot_constants import (
+    DEFAULT_MAIN_MODEL_NAMES as DEFAULT_AOT_MAIN_MODEL_NAMES,
+    DEFAULT_SMALL_MODEL_NAMES as DEFAULT_AOT_ASSESSMENT_MODEL_NAMES,
+    DEFAULT_MAX_STEPS as DEFAULT_AOT_MAX_STEPS,
+    DEFAULT_MAX_TIME_SECONDS as DEFAULT_AOT_MAX_TIME_SECONDS,
+    DEFAULT_NO_PROGRESS_LIMIT as DEFAULT_AOT_NO_PROGRESS_LIMIT,
+    DEFAULT_MAIN_TEMPERATURE as DEFAULT_AOT_MAIN_TEMPERATURE,
+    DEFAULT_ASSESSMENT_TEMPERATURE as DEFAULT_AOT_ASSESSMENT_TEMPERATURE
+)
 from src.l2t_constants import (
     DEFAULT_L2T_CLASSIFICATION_MODEL_NAMES,
     DEFAULT_L2T_THOUGHT_GENERATION_MODEL_NAMES,
@@ -38,35 +43,44 @@ from src.l2t_constants import (
 
 def main():
     parser = argparse.ArgumentParser(
-        description="CLI Runner for Algorithm of Thought (AoT) and Learn-to-Think (L2T) processes.",
+        description="CLI Runner for Chain-of-Thought (CoT) processes.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     problem_group = parser.add_mutually_exclusive_group(required=True)
     problem_group.add_argument("--problem", "-p", type=str, help="Problem/question to solve.")
     problem_group.add_argument("--problem-filename", type=str, help="File containing the problem.")
 
-    # General arguments
+    # General Orchestrator and Process Selection Arguments
     parser.add_argument(
-        "--processing-mode", "--mode", dest="processing_mode", type=str,
-        choices=[mode.value for mode in AotTriggerMode] + ["l2t"], # Added 'l2t'
-        default=AotTriggerMode.ASSESS_FIRST.value,
-        help=(f"Processing mode (default: {AotTriggerMode.ASSESS_FIRST.value}).\n"
-              f" '{AotTriggerMode.ALWAYS_AOT.value}': Force AoT process.\n"
-              f" '{AotTriggerMode.ASSESS_FIRST.value}': Use small LLM to decide if AoT or ONESHOT.\n"
-              f" '{AotTriggerMode.NEVER_AOT.value}': Force ONESHOT (direct answer).\n"
-              f" 'l2t': Use Learn-to-Think process.")
+        "--process-type", type=str, choices=['aot', 'l2t'], required=True,
+        help="Type of CoT process to run (aot or l2t)."
     )
+    parser.add_argument(
+        "--trigger-mode", type=str, choices=[mode.value for mode in AotTriggerMode],
+        default=AotTriggerMode.ASSESS_FIRST.value,
+        help=(f"Trigger mode for the CoT process (default: {AotTriggerMode.ASSESS_FIRST.value}).\n"
+              f" '{AotTriggerMode.ALWAYS_AOT.value}': Force the selected CoT process.\n" 
+              f" '{AotTriggerMode.ASSESS_FIRST.value}': Use LLM to decide between CoT process or ONESHOT.\n"
+              f" '{AotTriggerMode.NEVER_AOT.value}': Force ONESHOT (direct answer), bypass CoT process.") 
+    )
+    # Orchestrator's direct one-shot and assessment config
+    parser.add_argument("--oneshot-models", type=str, nargs='+', default=DEFAULT_AOT_MAIN_MODEL_NAMES, 
+                           help=f"LLM(s) for direct ONESHOT answers. Default: {' '.join(DEFAULT_AOT_MAIN_MODEL_NAMES)}")
+    parser.add_argument("--oneshot-temp", type=float, default=DEFAULT_AOT_MAIN_TEMPERATURE,
+                           help=f"Temperature for ONESHOT LLM(s). Default: {DEFAULT_AOT_MAIN_TEMPERATURE}")
+    parser.add_argument("--assessment-models", type=str, nargs='+', default=DEFAULT_AOT_ASSESSMENT_MODEL_NAMES,
+                           help=f"Small LLM(s) for complexity assessment. Default: {' '.join(DEFAULT_AOT_ASSESSMENT_MODEL_NAMES)}")
+    parser.add_argument("--assessment-temp", type=float, default=DEFAULT_AOT_ASSESSMENT_TEMPERATURE,
+                           help=f"Temperature for assessment LLM(s). Default: {DEFAULT_AOT_ASSESSMENT_TEMPERATURE}")
+    parser.add_argument("--disable-heuristic", action="store_true",
+                           help="Disable local heuristic analysis for complexity assessment, always using LLM.")
 
-    # AoT Configuration Group
-    aot_group = parser.add_argument_group('AoT Process Configuration (used if processing-mode is AoT-related)')
+    # AoT Configuration Group (only relevant if --process-type aot)
+    aot_group = parser.add_argument_group('AoT Process Configuration (used if --process-type aot)')
     aot_group.add_argument("--aot-main-models", type=str, nargs='+', default=DEFAULT_AOT_MAIN_MODEL_NAMES,
-                           help=f"Main LLM(s) for AoT/ONESHOT. Default: {' '.join(DEFAULT_AOT_MAIN_MODEL_NAMES)}")
+                           help=f"Main LLM(s) for AoT reasoning steps. Default: {' '.join(DEFAULT_AOT_MAIN_MODEL_NAMES)}")
     aot_group.add_argument("--aot-main-temp", type=float, default=DEFAULT_AOT_MAIN_TEMPERATURE,
                            help=f"Temperature for AoT main LLM(s). Default: {DEFAULT_AOT_MAIN_TEMPERATURE}")
-    aot_group.add_argument("--aot-assess-models", type=str, nargs='+', default=DEFAULT_AOT_ASSESSMENT_MODEL_NAMES,
-                           help=f"Small LLM(s) for AoT assessment. Default: {' '.join(DEFAULT_AOT_ASSESSMENT_MODEL_NAMES)}")
-    aot_group.add_argument("--aot-assess-temp", type=float, default=DEFAULT_AOT_ASSESSMENT_TEMPERATURE,
-                           help=f"Temperature for AoT assessment LLM(s). Default: {DEFAULT_AOT_ASSESSMENT_TEMPERATURE}")
     aot_group.add_argument("--aot-max-steps", type=int, default=DEFAULT_AOT_MAX_STEPS,
                            help=f"Max AoT reasoning steps. Default: {DEFAULT_AOT_MAX_STEPS}.")
     aot_group.add_argument("--aot-max-reasoning-tokens", type=int, default=None,
@@ -77,11 +91,9 @@ def main():
                            help=f"Stop AoT if no progress for this many steps. Default: {DEFAULT_AOT_NO_PROGRESS_LIMIT}")
     aot_group.add_argument("--aot-pass-remaining-steps-pct", type=int, default=None, metavar="PCT", choices=range(0, 101),
                            help="Percentage (0-100) of original max_steps at which to inform LLM about dynamically remaining steps in AoT. Default: None.")
-    aot_group.add_argument("--aot-disable-heuristic", action="store_true",
-                           help="Disable the local heuristic analysis for AoT complexity assessment, always using the LLM for assessment.")
 
-    # L2T Configuration Group
-    l2t_group = parser.add_argument_group('L2T Process Configuration (used if processing-mode is l2t)')
+    # L2T Configuration Group (only relevant if --process-type l2t)
+    l2t_group = parser.add_argument_group('L2T Process Configuration (used if --process-type l2t)')
     l2t_group.add_argument("--l2t-classification-models", type=str, nargs='+', default=DEFAULT_L2T_CLASSIFICATION_MODEL_NAMES,
                            help=f"L2T classification model(s). Default: {' '.join(DEFAULT_L2T_CLASSIFICATION_MODEL_NAMES)}")
     l2t_group.add_argument("--l2t-thought-gen-models", type=str, nargs='+', default=DEFAULT_L2T_THOUGHT_GENERATION_MODEL_NAMES,
@@ -100,14 +112,11 @@ def main():
                            help=f"L2T max total nodes. Default: {DEFAULT_L2T_MAX_TOTAL_NODES}")
     l2t_group.add_argument("--l2t-max-time-seconds", type=int, default=DEFAULT_L2T_MAX_TIME_SECONDS,
                            help=f"L2T max time (seconds). Default: {DEFAULT_L2T_MAX_TIME_SECONDS}")
-    l2t_group.add_argument("--l2t-x-fmt", dest="l2t_x_fmt_default", type=str, default=DEFAULT_L2T_X_FMT_DEFAULT,
-                           help="L2T default format constraints string. Use with caution if string contains shell special characters.")
-    l2t_group.add_argument("--l2t-x-eva", dest="l2t_x_eva_default", type=str, default=DEFAULT_L2T_X_EVA_DEFAULT,
-                           help="L2T default evaluation criteria string. Use with caution if string contains shell special characters.")
+    l2t_group.add_argument("--l2t-x-fmt", dest="l2t_x_fmt_default", type=str, default=DEFAULT_L2T_X_FMT_DEFAULT)
+    l2t_group.add_argument("--l2t-x-eva", dest="l2t_x_eva_default", type=str, default=DEFAULT_L2T_X_EVA_DEFAULT)
     
     args = parser.parse_args()
 
-    # Setup logging
     log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
     log_level_val = getattr(logging, log_level_str, logging.INFO)
     if not isinstance(log_level_val, int):
@@ -135,15 +144,34 @@ def main():
             sys.exit(1)
     else: 
         problem_text = args.problem
-        if not problem_text:
+        if not problem_text: 
             logging.critical("No problem text provided either directly or via file.")
             sys.exit(1)
 
-    # Main logic based on processing mode
-    current_processing_mode = args.processing_mode
+    # Instantiate LLMClient once
+    llm_client = LLMClient(api_key=api_key)
 
-    if current_processing_mode == "l2t":
-        logging.info("L2T mode selected.")
+    # Instantiate selected CoT process
+    process_instance = None
+    if args.process_type == 'aot':
+        logging.info("AoT process type selected.")
+        aot_pass_remaining_steps_float: Optional[float] = None
+        if args.aot_pass_remaining_steps_pct is not None:
+            aot_pass_remaining_steps_float = args.aot_pass_remaining_steps_pct / 100.0
+        
+        aot_config = AoTRunnerConfig(
+            main_model_names=args.aot_main_models,
+            temperature=args.aot_main_temp,
+            max_steps=args.aot_max_steps,
+            max_reasoning_tokens=args.aot_max_reasoning_tokens,
+            max_time_seconds=args.aot_max_time,
+            no_progress_limit=args.aot_no_progress_limit,
+            pass_remaining_steps_pct=aot_pass_remaining_steps_float
+        )
+        process_instance = AoTProcessor(llm_client=llm_client, config=aot_config)
+
+    elif args.process_type == 'l2t':
+        logging.info("L2T process type selected.")
         l2t_config = L2TConfig(
             classification_model_names=args.l2t_classification_models,
             thought_generation_model_names=args.l2t_thought_gen_models,
@@ -157,62 +185,70 @@ def main():
             x_fmt_default=args.l2t_x_fmt_default,
             x_eva_default=args.l2t_x_eva_default,
         )
-        l2t_orchestrator = L2TOrchestrator(l2t_config=l2t_config, api_key=api_key)
-        l2t_result, l2t_summary_str = l2t_orchestrator.solve(problem_text)
+        process_instance = L2TProcessor(llm_client=llm_client, config=l2t_config)
+    else:
+        # This case should ideally be caught by argparse choices, but as a safeguard:
+        logging.critical(f"Invalid process type specified: {args.process_type}. Exiting.")
+        sys.exit(1)
+
+    # Parse trigger mode
+    try:
+        trigger_mode_enum_val = AotTriggerMode(args.trigger_mode)
+    except ValueError:
+        # This case should also ideally be caught by argparse choices
+        logging.critical(f"Invalid trigger mode string '{args.trigger_mode}'. Valid values are: {[m.value for m in AotTriggerMode]}. Exiting.")
+        sys.exit(1)
+
+    # Instantiate CoTOrchestrator
+    # The CoTOrchestrator creates its own LLMClient instance using the api_key.
+    # The process_instance (AoTProcessor or L2TProcessor) also has its own LLMClient.
+    # This is acceptable as per current design where CoTOrchestrator manages its client for assessment/direct calls,
+    # and the process uses its client for its internal operations.
+    cot_orchestrator = CoTOrchestrator(
+        process=process_instance,
+        trigger_mode=trigger_mode_enum_val,
+        direct_oneshot_model_names=args.oneshot_models,
+        direct_oneshot_temperature=args.oneshot_temp,
+        assessment_model_names=args.assessment_models,
+        assessment_temperature=args.assessment_temp,
+        api_key=api_key, 
+        use_heuristic_shortcut=not args.disable_heuristic
+    )
+    
+    # Solve the problem
+    solution, overall_summary_str = cot_orchestrator.solve(problem_text)
+
+    # Print results
+    print(overall_summary_str) 
+
+    # Determine exit status
+    if solution.final_answer and not solution.final_answer.startswith("Error:"):
+        logging.info(f"{args.process_type.upper()} orchestration completed. Final answer obtained.")
+        # Further check if the CoT process itself (if run) also reported success.
+        # This is for more nuanced success reporting. The main check is if a final_answer was produced.
+        if solution.cot_result and not solution.cot_result.succeeded:
+            logging.warning(
+                f"The {args.process_type.upper()} process was run but reported failure "
+                f"(Reason: {solution.cot_result.error_message or 'Unknown'}). "
+                "However, the orchestrator might have obtained a final answer via fallback."
+            )
+            # Depending on desired strictness, one might choose to exit with 1 here
+            # if the CoT process failing is considered a critical error, even if fallback worked.
+            # For now, if a final_answer (non-error) exists, we exit 0.
+        sys.exit(0)
+    else:
+        if solution.final_answer and solution.final_answer.startswith("Error:"):
+            logging.error(f"{args.process_type.upper()} orchestration resulted in an error state for the final answer: {solution.final_answer}")
+        else: # No final_answer at all
+            logging.error(f"{args.process_type.upper()} orchestration did not produce a final answer.")
         
-        print("\nL2T Process Summary:")
-        print(l2t_summary_str)
+        # Check for specific CoT process errors if it was run and failed, and no fallback answer was generated
+        if solution.cot_result and not solution.cot_result.succeeded and not solution.final_answer:
+            logging.error(f"The underlying {args.process_type.upper()} process reported failure: {solution.cot_result.error_message or 'Unknown'}")
+        elif solution.process_failed_and_fell_back and not solution.final_answer : # Fallback also failed
+            logging.error("The CoT process failed, and the subsequent fallback to one-shot also failed to produce an answer.")
 
-        if not l2t_result.succeeded:
-            logging.error(f"L2T process did not succeed. Error: {l2t_result.error_message}")
-            sys.exit(1)
-        else:
-            logging.info("L2T process completed successfully.")
-
-    else: # AoT modes (assess, always, never)
-        try:
-            aot_mode_enum_val = AotTriggerMode(current_processing_mode)
-        except ValueError:
-            logging.critical(f"Invalid AoT mode string '{current_processing_mode}' for AoT path. Exiting.")
-            sys.exit(1)
-
-        logging.info(f"AoT mode selected: {aot_mode_enum_val}")
-        
-        aot_pass_remaining_steps_float: Optional[float] = None
-        if args.aot_pass_remaining_steps_pct is not None:
-            aot_pass_remaining_steps_float = args.aot_pass_remaining_steps_pct / 100.0
-
-        aot_runner_config = AoTRunnerConfig(
-            main_model_names=args.aot_main_models,
-            temperature=args.aot_main_temp,
-            max_steps=args.aot_max_steps,
-            max_reasoning_tokens=args.aot_max_reasoning_tokens,
-            max_time_seconds=args.aot_max_time,
-            no_progress_limit=args.aot_no_progress_limit,
-            pass_remaining_steps_pct=aot_pass_remaining_steps_float
-        )
-        
-        aot_orchestrator = InteractiveAoTOrchestrator(
-            trigger_mode=aot_mode_enum_val,
-            aot_config=aot_runner_config,
-            direct_oneshot_model_names=args.aot_main_models, 
-            direct_oneshot_temperature=args.aot_main_temp,
-            assessment_model_names=args.aot_assess_models,
-            assessment_temperature=args.aot_assess_temp,
-            api_key=api_key,
-            use_heuristic_shortcut=not args.aot_disable_heuristic 
-        )
-        
-        solution, overall_summary_str = aot_orchestrator.solve(problem_text) 
-
-        print(overall_summary_str) 
-
-        if solution.aot_summary_output: 
-            print(solution.aot_summary_output) 
-        
-        if not solution.final_answer and aot_mode_enum_val != AotTriggerMode.NEVER_AOT:
-            logging.warning("AoT process did not produce a final answer.")
-            # Consider if sys.exit(1) is appropriate here based on desired behavior for AoT non-success
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
