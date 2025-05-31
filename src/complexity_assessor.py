@@ -1,17 +1,21 @@
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from src.aot.dataclasses import LLMCallStats
 from src.aot.enums import AssessmentDecision
-from src.llm_client import LLMClient
+# from src.llm_client import LLMClient # Moved for TYPE_CHECKING to break circular import
 from src.prompt_generator import PromptGenerator
 from src.heuristic_detector import HeuristicDetector # Import the new class
-from typing import Optional # Import Optional
+
+# For type hinting to avoid circular import
+import typing
+if typing.TYPE_CHECKING:
+    from src.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
 class ComplexityAssessor:
-    def __init__(self, llm_client: LLMClient, small_model_names: List[str], temperature: float, use_heuristic_shortcut: bool = True, heuristic_detector: Optional[HeuristicDetector] = None):
+    def __init__(self, llm_client: 'LLMClient', small_model_names: List[str], temperature: float, use_heuristic_shortcut: bool = True, heuristic_detector: Optional[HeuristicDetector] = None):
         self.llm_client = llm_client
         self.small_model_names = small_model_names
         self.temperature = temperature
@@ -39,7 +43,7 @@ class ComplexityAssessor:
         )
         logging.debug(f"Assessment model ({stats.model_name}) raw response: '{response_content.strip()}'")
         logging.info(f"Assessment call: {stats.model_name}, Duration: {stats.call_duration_seconds:.2f}s, Tokens (C:{stats.completion_tokens}, P:{stats.prompt_tokens})")
-        
+
         decision = AssessmentDecision.ADVANCED_REASONING # Default decision
         if response_content.startswith("Error:"):
             logging.warning(f"Assessment model call failed. Defaulting to ADVANCED_REASONING. Error: {response_content}")

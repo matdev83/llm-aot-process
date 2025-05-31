@@ -6,7 +6,7 @@ from typing import List, Tuple, Optional, Any # Import Optional and Any
 from src.reasoning_process import ReasoningProcess # Import the base class
 from .enums import AotTriggerMode, AssessmentDecision
 from .dataclasses import LLMCallStats, AoTRunnerConfig, Solution
-from src.llm_client import LLMClient
+# from src.llm_client import LLMClient # Moved to __init__ to resolve circular import
 from src.complexity_assessor import ComplexityAssessor
 from .processor import AoTProcessor
 from src.heuristic_detector import HeuristicDetector
@@ -31,6 +31,7 @@ class AoTProcess(ReasoningProcess):
         self.direct_oneshot_model_names = direct_oneshot_model_names
         self.direct_oneshot_temperature = direct_oneshot_temperature
         
+        from src.llm_client import LLMClient # Moved here
         self.llm_client = LLMClient( # AoTProcess has its own LLMClient
             api_key=api_key,
             enable_rate_limiting=enable_rate_limiting,
@@ -147,6 +148,7 @@ class InteractiveAoTOrchestrator: # Renamed from AoTOrchestrator for clarity
         self.direct_oneshot_model_names = direct_oneshot_model_names 
         self.direct_oneshot_temperature = direct_oneshot_temperature
         
+        from src.llm_client import LLMClient # Moved here
         self.llm_client = LLMClient( # For orchestrator's direct calls & assessor
             api_key=api_key,
             enable_rate_limiting=enable_rate_limiting,

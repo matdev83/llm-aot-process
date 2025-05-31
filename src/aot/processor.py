@@ -3,13 +3,18 @@ import logging
 import io
 from typing import List, Optional, Tuple
 from .dataclasses import LLMCallStats, ParsedLLMOutput, AoTRunnerConfig, AoTResult
-from src.llm_client import LLMClient
+# from src.llm_client import LLMClient # Moved for TYPE_CHECKING
 from src.prompt_generator import PromptGenerator
 from src.response_parser import ResponseParser
 from .constants import MIN_PREDICTED_STEP_TOKENS_FALLBACK, MIN_PREDICTED_STEP_DURATION_FALLBACK
 
+# For type hinting to avoid circular import
+import typing
+if typing.TYPE_CHECKING:
+    from src.llm_client import LLMClient
+
 class AoTProcessor:
-    def __init__(self, llm_client: LLMClient, config: AoTRunnerConfig):
+    def __init__(self, llm_client: 'LLMClient', config: AoTRunnerConfig):
         self.llm_client = llm_client
         self.config = config
 
@@ -27,7 +32,7 @@ class AoTProcessor:
 
         logging.info(f"Starting AoT process for problem: '{problem_text[:100].strip()}...'")
         logging.info(f"Main Models: {', '.join(self.config.main_model_names)}, Temperature: {self.config.temperature}")
-        if self.config.max_reasoning_tokens: 
+        if self.config.max_reasoning_tokens:
             logging.info(f"Reasoning Token Limit: {self.config.max_reasoning_tokens}")
         logging.info(f"Max Time Limit (Overall Process): {self.config.max_time_seconds}s")
         logging.info(f"Original Max Steps Config: {original_configured_max_steps}")
@@ -38,7 +43,7 @@ class AoTProcessor:
 
         reasoning_loop_broke_early = False
         current_step_1_indexed = 0 # Initialize to 0 for cases where loop doesn't run
-        
+
         for step_num_for_loop in range(original_configured_max_steps):
             current_step_1_indexed = step_num_for_loop + 1
             elapsed_process_time = time.monotonic() - process_start_time
@@ -63,12 +68,12 @@ class AoTProcessor:
                         deltas = [step_completion_tokens_history[i] - step_completion_tokens_history[i-1] for i in range(1, len(step_completion_tokens_history))]
                         if deltas: current_avg_token_delta = sum(deltas) / len(deltas)
                     predicted_tokens_for_current_step = max(MIN_PREDICTED_STEP_TOKENS_FALLBACK, step_completion_tokens_history[-1] + current_avg_token_delta)
-                
+
                 if result.reasoning_completion_tokens + predicted_tokens_for_current_step > self.config.max_reasoning_tokens:
                     logging.info(f"[HARD STOP TOKENS] Predicted to exceed token limit ({self.config.max_reasoning_tokens}) if current step {current_step_1_indexed} is taken. "
                                  f"Current usage: {result.reasoning_completion_tokens}, predicted: {predicted_tokens_for_current_step:.0f}. Stopping.")
                     reasoning_loop_broke_early = True; break
-                
+
                 affordable_steps_by_token = 0
                 temp_token_budget = self.config.max_reasoning_tokens - result.reasoning_completion_tokens
                 cost_of_projected_token_step = predicted_tokens_for_current_step
@@ -88,7 +93,7 @@ class AoTProcessor:
                     if current_step_1_indexed > current_effective_max_steps:
                          logging.info(f"Current step {current_step_1_indexed} now exceeds token-adjusted effective max steps ({current_effective_max_steps}). Stopping.")
                          reasoning_loop_broke_early = True; break
-            
+
             if self.config.max_time_seconds > 0:
                 remaining_time_budget_for_steps = self.config.max_time_seconds - elapsed_process_time
                 predicted_duration_for_current_step = MIN_PREDICTED_STEP_DURATION_FALLBACK
@@ -107,7 +112,7 @@ class AoTProcessor:
                     logging.info(f"[HARD STOP TIME] Predicted duration ({predicted_duration_for_current_step:.2f}s) for current step {current_step_1_indexed} "
                                  f"exceeds remaining time budget ({remaining_time_budget_for_steps:.2f}s). Stopping.")
                     reasoning_loop_broke_early = True; break
-                
+
                 affordable_steps_by_time = 0
                 temp_time_budget_projection = remaining_time_budget_for_steps
                 cost_of_projected_time_step = predicted_duration_for_current_step
@@ -164,7 +169,7 @@ class AoTProcessor:
                 logging.info("Final answer found within a reasoning step's response.")
                 result.final_answer = parsed_data.final_answer_text
                 reasoning_loop_broke_early = True
-                if parsed_data.ran_out_of_steps_signal: 
+                if parsed_data.ran_out_of_steps_signal:
                     logging.info("Model also signaled all unique reasoning steps are complete.")
                 break
             if parsed_data.ran_out_of_steps_signal:
@@ -180,17 +185,17 @@ class AoTProcessor:
             else:
                 no_progress_count += 1
                 logging.warning(f"No 'Current answer/state:' found in step output. No-progress count: {no_progress_count}")
-            
+
             if no_progress_count >= self.config.no_progress_limit:
                 logging.warning(f"No progress detected for {self.config.no_progress_limit} consecutive steps. Stopping reasoning phase.")
                 reasoning_loop_broke_early = True; break
-            
+
             time.sleep(0.2) # Shorter sleep, mainly for API courtesy if calls are rapid
 
         if not reasoning_loop_broke_early and current_step_1_indexed >= current_effective_max_steps :
             logging.info(f"Max effective steps ({current_effective_max_steps}) reached.")
 
-        if not result.final_answer: 
+        if not result.final_answer:
             logging.info("--- Generating Final Answer (Explicit AoT Call) ---")
             can_make_final_call = True
             if self.config.max_time_seconds > 0 and (self.config.max_time_seconds - (time.monotonic() - process_start_time)) < MIN_PREDICTED_STEP_DURATION_FALLBACK * 1.5: # Adjusted multiplier
@@ -209,10 +214,10 @@ class AoTProcessor:
                 result.total_llm_interaction_time_seconds += final_stats.call_duration_seconds
                 result.total_completion_tokens += final_stats.completion_tokens # These are not reasoning_completion_tokens
                 result.total_prompt_tokens += final_stats.prompt_tokens
-                
+
                 logging.debug(f"Final Response from {final_stats.model_name}:\n{final_reply_content}")
                 logging.info(f"LLM call ({final_stats.model_name}): Duration: {final_stats.call_duration_seconds:.2f}s, Tokens (C:{final_stats.completion_tokens}, P:{final_stats.prompt_tokens})")
-                
+
                 if final_reply_content.startswith("Error:"):
                     logging.warning(f"LLM call for final answer failed: {final_reply_content}")
                 else:
@@ -224,7 +229,7 @@ class AoTProcessor:
                         result.final_answer = final_reply_content # Use raw content if parsing fails
             else:
                  logging.info("Skipped explicit final answer generation due to budget constraints.")
-        
+
         if result.final_answer and not result.final_answer.startswith("Error:"):
             result.succeeded = True
         else:
