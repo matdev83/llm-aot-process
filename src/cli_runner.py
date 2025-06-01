@@ -25,6 +25,21 @@ from src.aot.constants import (
     DEFAULT_ASSESSMENT_TEMPERATURE as DEFAULT_AOT_ASSESSMENT_TEMPERATURE
 )
 
+# ToT Imports
+from src.tot.enums import ToTSearchStrategy, ToTScoringMethod
+from src.tot.dataclasses import ToTConfig, ToTSolution
+from src.tot.orchestrator import InteractiveToTOrchestrator, ToTProcess, ToTTriggerMode # ToTTriggerMode is alias from aot.enums
+from src.tot.constants import (
+    DEFAULT_TOT_THOUGHT_GENERATION_MODEL_NAMES,
+    DEFAULT_TOT_EVALUATION_MODEL_NAMES,
+    DEFAULT_TOT_THOUGHT_GENERATION_TEMPERATURE,
+    DEFAULT_TOT_EVALUATION_TEMPERATURE,
+    DEFAULT_TOT_DIRECT_ONESHOT_TEMPERATURE, # Added in this subtask
+    DEFAULT_TOT_ASSESSMENT_TEMPERATURE,     # Added in this subtask
+    DEFAULT_K_THOUGHTS, DEFAULT_B_BEAM_WIDTH, DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_TOTAL_THOUGHTS_GENERATED, DEFAULT_MAX_TIME_SECONDS
+)
+
 from src.l2t.enums import L2TTriggerMode
 from src.l2t.orchestrator import L2TOrchestrator
 from src.l2t.processor import L2TProcessor
@@ -70,6 +85,7 @@ from src.hybrid.constants import (
 DIRECT_AOT_MODE = "aot-direct"
 DIRECT_L2T_MODE = "l2t-direct"
 DIRECT_HYBRID_MODE = "hybrid-direct"
+DIRECT_TOT_MODE = "tot-direct" # New ToT direct mode
 
 def main():
     parser = argparse.ArgumentParser(
@@ -85,19 +101,21 @@ def main():
         "aot-always", "aot-assess-first", "aot-never",
         "l2t",
         "hybrid-always", "hybrid-assess-first", "hybrid-never",
-        DIRECT_AOT_MODE, DIRECT_L2T_MODE, DIRECT_HYBRID_MODE
+        "tot-always", "tot-assess-first", "tot-never", # Orchestrator modes for ToT
+        DIRECT_AOT_MODE, DIRECT_L2T_MODE, DIRECT_HYBRID_MODE, DIRECT_TOT_MODE
     ])))
 
     parser.add_argument(
         "--processing-mode", "--mode", dest="processing_mode", type=str,
         choices=all_modes,
-        default="aot-assess-first", # Default to the new explicit name
+        default="aot-assess-first",
         help=(f"Processing mode (default: aot-assess-first).\n"
               f"Available modes: {', '.join(all_modes)}\n"
               f"  AoT Orchestrator Modes: 'aot-always', 'aot-assess-first', 'aot-never'\n"
               f"  L2T Orchestrator Mode: 'l2t'\n"
               f"  Hybrid Orchestrator Modes: 'hybrid-always', 'hybrid-assess-first', 'hybrid-never'\n"
-              f"  Direct Process Modes: '{DIRECT_AOT_MODE}', '{DIRECT_L2T_MODE}', '{DIRECT_HYBRID_MODE}'")
+              f"  ToT Orchestrator Modes: 'tot-always', 'tot-assess-first', 'tot-never'\n"
+              f"  Direct Process Modes: '{DIRECT_AOT_MODE}', '{DIRECT_L2T_MODE}', '{DIRECT_HYBRID_MODE}', '{DIRECT_TOT_MODE}'")
     )
 
     parser.add_argument("--enable-rate-limiting", action="store_true", help="Enable rate limiting for LLM calls.")
@@ -182,6 +200,41 @@ def main():
     hybrid_group.add_argument("--hybrid-disable-heuristic", action="store_true",
                            help="Disable the local heuristic analysis for Hybrid complexity assessment, always using the LLM for assessment.")
 
+    # ToT Configuration Group
+    tot_group = parser.add_argument_group('ToT Process Configuration')
+    tot_group.add_argument("--tot-thought-models", type=str, nargs='+', default=DEFAULT_TOT_THOUGHT_GENERATION_MODEL_NAMES,
+                           help=f"LLM(s) for ToT thought generation. Default: {' '.join(DEFAULT_TOT_THOUGHT_GENERATION_MODEL_NAMES)}")
+    tot_group.add_argument("--tot-thought-temp", type=float, default=DEFAULT_TOT_THOUGHT_GENERATION_TEMPERATURE,
+                           help=f"Temperature for ToT thought generation. Default: {DEFAULT_TOT_THOUGHT_GENERATION_TEMPERATURE}")
+    tot_group.add_argument("--tot-eval-models", type=str, nargs='+', default=DEFAULT_TOT_EVALUATION_MODEL_NAMES,
+                           help=f"LLM(s) for ToT state evaluation. Default: {' '.join(DEFAULT_TOT_EVALUATION_MODEL_NAMES)}")
+    tot_group.add_argument("--tot-eval-temp", type=float, default=DEFAULT_TOT_EVALUATION_TEMPERATURE,
+                           help=f"Temperature for ToT state evaluation. Default: {DEFAULT_TOT_EVALUATION_TEMPERATURE}")
+
+    tot_group.add_argument("--tot-direct-oneshot-temp", type=float, default=DEFAULT_TOT_DIRECT_ONESHOT_TEMPERATURE,
+                            help=f"Temperature for ToT Orchestrator's direct one-shot or ToTProcess fallback. Default: {DEFAULT_TOT_DIRECT_ONESHOT_TEMPERATURE}")
+    tot_group.add_argument("--tot-assess-models", type=str, nargs='+', default=DEFAULT_AOT_ASSESSMENT_MODEL_NAMES,
+                            help=f"LLM(s) for ToT complexity assessment. Default: {' '.join(DEFAULT_AOT_ASSESSMENT_MODEL_NAMES)}")
+    tot_group.add_argument("--tot-assess-temp", type=float, default=DEFAULT_TOT_ASSESSMENT_TEMPERATURE,
+                            help=f"Temperature for ToT complexity assessment. Default: {DEFAULT_TOT_ASSESSMENT_TEMPERATURE}")
+
+    tot_group.add_argument("--tot-k-thoughts", type=int, default=DEFAULT_K_THOUGHTS,
+                           help=f"Number of thoughts to generate per expansion (K). Default: {DEFAULT_K_THOUGHTS}")
+    tot_group.add_argument("--tot-b-beam-width", type=int, default=DEFAULT_B_BEAM_WIDTH,
+                           help=f"Beam width for Beam Search (B). Default: {DEFAULT_B_BEAM_WIDTH}")
+    tot_group.add_argument("--tot-max-depth", type=int, default=DEFAULT_MAX_DEPTH,
+                           help=f"Maximum depth of the thought tree. Default: {DEFAULT_MAX_DEPTH}")
+    tot_group.add_argument("--tot-max-total-thoughts", type=int, default=DEFAULT_MAX_TOTAL_THOUGHTS_GENERATED,
+                           help=f"Maximum total thoughts to generate in a run. Default: {DEFAULT_MAX_TOTAL_THOUGHTS_GENERATED}")
+    tot_group.add_argument("--tot-max-time", type=int, default=DEFAULT_MAX_TIME_SECONDS,
+                           help=f"Overall max time for a ToT run (seconds). Default: {DEFAULT_MAX_TIME_SECONDS}s")
+    tot_group.add_argument("--tot-search-strategy", type=str, choices=[s.value for s in ToTSearchStrategy], default=ToTSearchStrategy.BEAM.value,
+                           help=f"Search strategy for ToT. Default: {ToTSearchStrategy.BEAM.value}")
+    tot_group.add_argument("--tot-scoring-method", type=str, choices=[s.value for s in ToTScoringMethod], default=ToTScoringMethod.LLM.value,
+                           help=f"Scoring method for ToT states. Default: {ToTScoringMethod.LLM.value}")
+    tot_group.add_argument("--tot-disable-heuristic", action="store_true",
+                            help="Disable local heuristic analysis for ToT complexity assessment (if assess-first mode).")
+
     args = parser.parse_args()
 
     log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -214,14 +267,15 @@ def main():
             sys.exit(1)
 
     current_processing_mode = args.processing_mode
-    solution: Optional[Union[AoTSolution, L2TSolution, HybridSolution]] = None
+    solution: Optional[Union[AoTSolution, L2TSolution, HybridSolution, ToTSolution]] = None # Added ToTSolution
     overall_summary_str = ""
 
     heuristic_detector_instance: Optional[HeuristicDetector] = None
     needs_heuristic_detector = False
     if (current_processing_mode == "aot-assess-first" and not args.aot_disable_heuristic) or \
        (current_processing_mode == "hybrid-assess-first" and not args.hybrid_disable_heuristic) or \
-       (current_processing_mode == "l2t"):
+       (current_processing_mode == "tot-assess-first" and not args.tot_disable_heuristic) or \
+       (current_processing_mode == "l2t"): # L2T might also use it
         needs_heuristic_detector = True
 
     if needs_heuristic_detector:
@@ -271,6 +325,25 @@ def main():
         max_reasoning_tokens=args.hybrid_max_reasoning_tokens,
         max_response_tokens=args.hybrid_max_response_tokens
     )
+
+    # ToT Configs
+    tot_base_config = ToTConfig(
+        thought_generation_model_names=args.tot_thought_models,
+        evaluation_model_names=args.tot_eval_models,
+        k_thoughts=args.tot_k_thoughts,
+        b_beam_width=args.tot_b_beam_width,
+        max_depth=args.tot_max_depth,
+        max_total_thoughts_generated=args.tot_max_total_thoughts,
+        max_time_seconds=args.tot_max_time,
+        search_strategy=ToTSearchStrategy(args.tot_search_strategy),
+        scoring_method=ToTScoringMethod(args.tot_scoring_method)
+    )
+
+    tot_thought_generation_llm_config = LLMConfig(temperature=args.tot_thought_temp)
+    tot_evaluation_llm_config = LLMConfig(temperature=args.tot_eval_temp)
+    tot_direct_oneshot_llm_config = LLMConfig(temperature=args.tot_direct_oneshot_temp)
+    tot_assessment_llm_config = LLMConfig(temperature=args.tot_assess_temp)
+    tot_orchestrator_direct_oneshot_models = args.tot_thought_models
 
     if current_processing_mode == DIRECT_AOT_MODE:
         logging.info("Direct AoTProcessor mode selected.")
@@ -328,7 +401,32 @@ def main():
             logging.error(f"Direct HybridProcess did not produce a final answer. Error: {error_detail}")
             sys.exit(1)
 
-    elif current_processing_mode == "l2t": # This is the L2T Orchestrator mode
+    elif current_processing_mode == DIRECT_TOT_MODE:
+        logging.info("Direct ToTProcessor mode selected.")
+        tot_process_direct_fallback_models = args.tot_thought_models
+        direct_tot_process_instance = ToTProcess(
+            llm_client=shared_llm_client,
+            tot_config=tot_base_config,
+            thought_generation_llm_config=tot_thought_generation_llm_config,
+            evaluation_llm_config=tot_evaluation_llm_config,
+            direct_oneshot_llm_config=tot_direct_oneshot_llm_config,
+            direct_oneshot_model_names=tot_process_direct_fallback_models
+        )
+        direct_tot_process_instance.execute(problem_text, model_name="direct_tot")
+        solution, overall_summary_str = direct_tot_process_instance.get_result()
+
+        print("\nDirect ToTProcess Execution Summary:")
+        print(overall_summary_str if overall_summary_str else "No summary returned by ToTProcess.")
+        if not (solution and solution.final_answer and not solution.final_answer.startswith("Error:")):
+            error_detail = "Unknown error"
+            if solution and solution.tot_result and solution.tot_result.error_message:
+                error_detail = solution.tot_result.error_message
+            elif solution and solution.final_answer and solution.final_answer.startswith("Error:"):
+                error_detail = solution.final_answer
+            logging.error(f"Direct ToTProcess did not produce a final answer or failed. Error: {error_detail}")
+            sys.exit(1)
+
+    elif current_processing_mode == "l2t":
         logging.info("L2TOrchestrator mode selected.")
         l2t_orchestrator = L2TOrchestrator(
             trigger_mode=L2TTriggerMode.ALWAYS_L2T, # L2T Orchestrator always runs L2T
@@ -424,8 +522,48 @@ def main():
         if not (solution and solution.final_answer):
             logging.error("Interactive AoT Orchestrator process did not produce a final answer.")
             if aot_mode_enum_val != AotTriggerMode.NEVER_AOT: sys.exit(1)
+
+    elif current_processing_mode.startswith("tot-"):
+        try:
+            if current_processing_mode == "tot-always":
+                tot_mode_enum_val = ToTTriggerMode.ALWAYS_AOT # Using AOT enum value as per orchestrator alias
+            elif current_processing_mode == "tot-assess-first":
+                tot_mode_enum_val = ToTTriggerMode.ASSESS_FIRST
+            elif current_processing_mode == "tot-never":
+                tot_mode_enum_val = ToTTriggerMode.NEVER_AOT
+            else:
+                raise ValueError(f"Unknown ToT mode: {current_processing_mode}")
+        except ValueError as e:
+            logging.critical(f"Invalid ToT mode string '{current_processing_mode}'. Error: {e}. Exiting.")
+            sys.exit(1)
+
+        logging.info(f"InteractiveToTOrchestrator mode selected: {tot_mode_enum_val.value}")
+        tot_orchestrator = InteractiveToTOrchestrator(
+            llm_client=shared_llm_client,
+            trigger_mode=tot_mode_enum_val,
+            tot_config=tot_base_config,
+            thought_generation_llm_config=tot_thought_generation_llm_config,
+            evaluation_llm_config=tot_evaluation_llm_config,
+            direct_oneshot_llm_config=tot_direct_oneshot_llm_config,
+            assessment_llm_config=tot_assessment_llm_config,
+            direct_oneshot_model_names=tot_orchestrator_direct_oneshot_models,
+            assessment_model_names=args.tot_assess_models,
+            use_heuristic_shortcut=not args.tot_disable_heuristic,
+            heuristic_detector=heuristic_detector_instance
+        )
+        solution, overall_summary_str = tot_orchestrator.solve(problem_description)
+        print("\nInteractive ToT Orchestrator Summary:")
+        print(overall_summary_str)
+        if not (solution and solution.final_answer and not solution.final_answer.startswith("Error:")):
+            error_detail = "Unknown error"
+            if solution and solution.tot_result and solution.tot_result.error_message:
+                error_detail = solution.tot_result.error_message
+            elif solution and solution.final_answer and solution.final_answer.startswith("Error:"):
+                error_detail = solution.final_answer
+            logging.error(f"Interactive ToT Orchestrator process did not produce a final answer or failed. Error: {error_detail}")
+            if tot_mode_enum_val != ToTTriggerMode.NEVER_AOT:
+                 sys.exit(1)
     else:
-        # This path should ideally not be reached if argparse choices are comprehensive
         logging.critical(f"Unknown or unhandled processing mode: {current_processing_mode}. Exiting.")
         sys.exit(1)
 
